@@ -11,6 +11,7 @@ work = "2.9.0"
 coroutines = "1.8.1"
 okhttp = "4.12.0"
 googleAuth = "1.23.0"
+playServicesAuth = "21.2.0"
 junit = "4.13.2"
 mockk = "1.13.10"
 espressoCore = "3.5.1"
@@ -48,6 +49,7 @@ kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-
 okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }
 okhttp-logging = { group = "com.squareup.okhttp3", name = "logging-interceptor", version.ref = "okhttp" }
 google-auth-oauth2 = { group = "com.google.auth", name = "google-auth-library-oauth2-http", version.ref = "googleAuth" }
+play-services-auth = { group = "com.google.android.gms", name = "play-services-auth", version.ref = "playServicesAuth" }
 
 # Testing
 junit = { group = "junit", name = "junit", version.ref = "junit" }

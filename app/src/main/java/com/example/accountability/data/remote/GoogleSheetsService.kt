@@ -1,8 +1,14 @@
 package com.example.accountability.data.remote
 
+import android.accounts.Account
 import android.content.Context
 import android.util.Log
 import com.example.accountability.data.local.AccountabilityEntity
+import com.google.android.gms.auth.GoogleAuthUtil
+import com.google.android.gms.auth.api.signin.GoogleSignIn
+import com.google.android.gms.auth.api.signin.GoogleSignInAccount
+import com.google.android.gms.auth.api.signin.GoogleSignInOptions
+import com.google.android.gms.common.api.Scope
 import com.google.auth.oauth2.GoogleCredentials
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -21,15 +27,16 @@ import java.util.Collections
 import java.util.concurrent.TimeUnit
 
 enum class AuthMode {
-    SERVICE_ACCOUNT,
-    OAUTH_REFRESH_TOKEN
+    GOOGLE_SIGN_IN,     // 1-Time Native Google Account Login (Recommended)
+    SERVICE_ACCOUNT,    // Option A: Service Account JSON
+    OAUTH_REFRESH_TOKEN // Option B: OAuth 2.0 with Refresh Token
 }
 
 class GoogleSheetsService(private val context: Context) {
 
     companion object {
         private const val TAG = "GoogleSheetsService"
-        private const val SCOPE_SPREADSHEETS = "https://www.googleapis.com/auth/spreadsheets"
+        const val SCOPE_SPREADSHEETS = "https://www.googleapis.com/auth/spreadsheets"
         private const val PREFS_NAME = "accountability_settings"
         
         // Configuration Keys
@@ -38,11 +45,15 @@ class GoogleSheetsService(private val context: Context) {
         private const val KEY_AUTH_MODE = "auth_mode"
         private const val DEFAULT_SHEET_NAME = "Sheet1"
         
-        // Service Account Key
+        // 1. Google Sign-In Keys (1-Time Login)
+        private const val KEY_GOOGLE_ACCOUNT_EMAIL = "google_account_email"
+        private const val KEY_GOOGLE_ACCOUNT_NAME = "google_account_name"
+        
+        // 2. Service Account Key
         const val CREDENTIALS_FILE_NAME = "service_account.json"
         private const val KEY_SERVICE_ACCOUNT_JSON = "service_account_raw_json"
         
-        // OAuth 2.0 Keys (1-Time Authorization & Persistent Background Refresh)
+        // 3. OAuth 2.0 Keys (Manual Refresh Token)
         private const val KEY_OAUTH_CLIENT_ID = "oauth_client_id"
         private const val KEY_OAUTH_CLIENT_SECRET = "oauth_client_secret"
         private const val KEY_OAUTH_REFRESH_TOKEN = "oauth_refresh_token"
@@ -58,11 +69,11 @@ class GoogleSheetsService(private val context: Context) {
     private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
     fun getAuthMode(): AuthMode {
-        val modeStr = prefs.getString(KEY_AUTH_MODE, AuthMode.SERVICE_ACCOUNT.name)
+        val modeStr = prefs.getString(KEY_AUTH_MODE, AuthMode.GOOGLE_SIGN_IN.name)
         return try {
-            AuthMode.valueOf(modeStr ?: AuthMode.SERVICE_ACCOUNT.name)
+            AuthMode.valueOf(modeStr ?: AuthMode.GOOGLE_SIGN_IN.name)
         } catch (e: Exception) {
-            AuthMode.SERVICE_ACCOUNT
+            AuthMode.GOOGLE_SIGN_IN
         }
     }
 
@@ -87,7 +98,65 @@ class GoogleSheetsService(private val context: Context) {
     }
 
     // -----------------------------------------------------------------------------------
-    // 1. Service Account (Option A) Storage & Credentials
+    // 1. Google Account (1-Time Sign-In & Daily Persistent Access)
+    // -----------------------------------------------------------------------------------
+
+    fun saveGoogleAccount(email: String, displayName: String? = null) {
+        prefs.edit()
+            .putString(KEY_GOOGLE_ACCOUNT_EMAIL, email.trim())
+            .putString(KEY_GOOGLE_ACCOUNT_NAME, displayName?.trim() ?: "")
+            .putString(KEY_AUTH_MODE, AuthMode.GOOGLE_SIGN_IN.name)
+            .apply()
+        Log.i(TAG, "Saved Google Account: $email")
+    }
+
+    fun getGoogleAccountEmail(): String? {
+        val account = GoogleSignIn.getLastSignedInAccount(context)
+        if (!account?.email.isNullOrBlank()) return account.email
+        return prefs.getString(KEY_GOOGLE_ACCOUNT_EMAIL, null)
+    }
+
+    fun getGoogleAccountDisplayName(): String? {
+        val account = GoogleSignIn.getLastSignedInAccount(context)
+        if (!account?.displayName.isNullOrBlank()) return account.displayName
+        return prefs.getString(KEY_GOOGLE_ACCOUNT_NAME, null)
+    }
+
+    fun isGoogleSignedIn(): Boolean {
+        val account = GoogleSignIn.getLastSignedInAccount(context)
+        if (account != null && !account.email.isNullOrBlank()) return true
+        val email = prefs.getString(KEY_GOOGLE_ACCOUNT_EMAIL, null)
+        return !email.isNullOrBlank()
+    }
+
+    fun signOutGoogle(onComplete: (() -> Unit)? = null) {
+        try {
+            val gso = GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
+                .requestEmail()
+                .requestScopes(Scope(SCOPE_SPREADSHEETS))
+                .build()
+            GoogleSignIn.getClient(context, gso).signOut().addOnCompleteListener {
+                prefs.edit()
+                    .remove(KEY_GOOGLE_ACCOUNT_EMAIL)
+                    .remove(KEY_GOOGLE_ACCOUNT_NAME)
+                    .remove(KEY_CACHED_ACCESS_TOKEN)
+                    .remove(KEY_TOKEN_EXPIRY_EPOCH)
+                    .apply()
+                Log.i(TAG, "Signed out from Google Account.")
+                onComplete?.invoke()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error signing out", e)
+            prefs.edit()
+                .remove(KEY_GOOGLE_ACCOUNT_EMAIL)
+                .remove(KEY_GOOGLE_ACCOUNT_NAME)
+                .apply()
+            onComplete?.invoke()
+        }
+    }
+
+    // -----------------------------------------------------------------------------------
+    // 2. Service Account (Option A) Storage & Credentials
     // -----------------------------------------------------------------------------------
 
     fun saveCredentialsJson(jsonString: String): Boolean {
@@ -166,7 +235,7 @@ class GoogleSheetsService(private val context: Context) {
     }
 
     // -----------------------------------------------------------------------------------
-    // 2. OAuth 2.0 with Refresh Token (1-Time Authorization & Daily Persistent Access)
+    // 3. OAuth 2.0 with Refresh Token (Manual 1-Time Authorization & Daily Access)
     // -----------------------------------------------------------------------------------
 
     fun saveOAuthCredentials(clientId: String, clientSecret: String, refreshToken: String) {
@@ -188,6 +257,7 @@ class GoogleSheetsService(private val context: Context) {
 
     fun hasValidAuthentication(): Boolean {
         return when (getAuthMode()) {
+            AuthMode.GOOGLE_SIGN_IN -> isGoogleSignedIn()
             AuthMode.SERVICE_ACCOUNT -> hasServiceAccountCredentials()
             AuthMode.OAUTH_REFRESH_TOKEN -> hasOAuthRefreshToken()
         }
@@ -232,7 +302,6 @@ class GoogleSheetsService(private val context: Context) {
         val expiresInSeconds = json.optLong("expires_in", 3600L)
         val expiryEpoch = System.currentTimeMillis() + (expiresInSeconds * 1000L) - (60 * 1000L) // 60s buffer
 
-        // Persist cached token & expiry
         prefs.edit()
             .putString(KEY_CACHED_ACCESS_TOKEN, newAccessToken)
             .putLong(KEY_TOKEN_EXPIRY_EPOCH, expiryEpoch)
@@ -244,37 +313,75 @@ class GoogleSheetsService(private val context: Context) {
 
     /**
      * Resolves valid Access Token using either:
-     * - Service Account private key JWT exchange, OR
+     * - Google Account (Google Play Services Auth)
      * - OAuth 2.0 Refresh Token exchange
+     * - Service Account private key JWT exchange
      */
     suspend fun getAccessToken(): String = withContext(Dispatchers.IO) {
         val mode = getAuthMode()
 
-        if (mode == AuthMode.OAUTH_REFRESH_TOKEN && hasOAuthRefreshToken()) {
-            val cachedToken = prefs.getString(KEY_CACHED_ACCESS_TOKEN, null)
-            val expiry = prefs.getLong(KEY_TOKEN_EXPIRY_EPOCH, 0L)
-            
-            // If cached access token is still fresh, reuse it immediately
-            if (!cachedToken.isNullOrBlank() && System.currentTimeMillis() < expiry) {
-                return@withContext cachedToken
+        when (mode) {
+            AuthMode.GOOGLE_SIGN_IN -> {
+                val account = GoogleSignIn.getLastSignedInAccount(context)
+                val email = account?.email ?: prefs.getString(KEY_GOOGLE_ACCOUNT_EMAIL, null)
+                    ?: throw IllegalStateException("Please sign in with your Google account once.")
+
+                val androidAccount = account?.account ?: Account(email, "com.google")
+
+                try {
+                    // Fetch valid OAuth 2.0 access token via Google Play Services (auto-refreshed by OS)
+                    val scopeStr = "oauth2:$SCOPE_SPREADSHEETS"
+                    GoogleAuthUtil.getToken(context, androidAccount, scopeStr)
+                } catch (e: Exception) {
+                    Log.e(TAG, "GoogleAuthUtil.getToken failed: ${e.message}", e)
+                    throw IllegalStateException("Google authentication required: ${e.message}")
+                }
             }
-            return@withContext refreshOAuthAccessToken()
+
+            AuthMode.OAUTH_REFRESH_TOKEN -> {
+                if (hasOAuthRefreshToken()) {
+                    val cachedToken = prefs.getString(KEY_CACHED_ACCESS_TOKEN, null)
+                    val expiry = prefs.getLong(KEY_TOKEN_EXPIRY_EPOCH, 0L)
+                    
+                    if (!cachedToken.isNullOrBlank() && System.currentTimeMillis() < expiry) {
+                        return@withContext cachedToken
+                    }
+                    return@withContext refreshOAuthAccessToken()
+                }
+                throw IllegalStateException("OAuth Refresh Token not configured.")
+            }
+
+            AuthMode.SERVICE_ACCOUNT -> {
+                val stream = openCredentialsStream()
+                    ?: throw IllegalStateException("Service Account credentials JSON not found. Please tap 'Configure Key' to paste it.")
+
+                stream.use { s ->
+                    val credentials = GoogleCredentials.fromStream(s)
+                        .createScoped(Collections.singletonList(SCOPE_SPREADSHEETS))
+                    credentials.refreshIfExpired()
+                    credentials.accessToken.tokenValue
+                }
+            }
         }
+    }
 
-        // Service Account flow
-        val stream = openCredentialsStream()
-            ?: throw IllegalStateException("Service Account credentials JSON not found in app storage or assets.")
-
-        stream.use { s ->
-            val credentials = GoogleCredentials.fromStream(s)
-                .createScoped(Collections.singletonList(SCOPE_SPREADSHEETS))
-            credentials.refreshIfExpired()
-            credentials.accessToken.tokenValue
+    /**
+     * Clears token from cache or Google Play Services when an HTTP 401 Unauthorized occurs.
+     */
+    fun invalidateToken(token: String) {
+        try {
+            if (getAuthMode() == AuthMode.GOOGLE_SIGN_IN) {
+                GoogleAuthUtil.clearToken(context, token)
+            } else {
+                prefs.edit().remove(KEY_CACHED_ACCESS_TOKEN).remove(KEY_TOKEN_EXPIRY_EPOCH).apply()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not invalidate token", e)
         }
     }
 
     // -----------------------------------------------------------------------------------
-    // 3. API Execution & Connection Verification
+    // 4. API Execution & Connection Verification
     // -----------------------------------------------------------------------------------
 
     /**
@@ -305,7 +412,11 @@ class GoogleSheetsService(private val context: Context) {
                 Result.success("Connected to: '$title'")
             } else {
                 val errorMsg = when (response.code) {
-                    403 -> "HTTP 403 Forbidden: Did you share the Google Sheet with the Service Account email or grant Sheets scope?"
+                    401 -> {
+                        invalidateToken(accessToken)
+                        "HTTP 401 Unauthorized: Access token expired or invalid. Please re-sign in."
+                    }
+                    403 -> "HTTP 403 Forbidden: Ensure your Google Account or Service Account has Editor access to this spreadsheet."
                     404 -> "HTTP 404: Spreadsheet ID not found. Verify the ID."
                     else -> "HTTP ${response.code}: $body"
                 }
@@ -366,6 +477,9 @@ class GoogleSheetsService(private val context: Context) {
                 Result.success(Unit)
             } else {
                 val errorBody = response.body?.string().orEmpty()
+                if (response.code == 401) {
+                    invalidateToken(accessToken)
+                }
                 Log.e(TAG, "Google Sheets API Error (${response.code}): $errorBody")
                 Result.failure(Exception("Google Sheets API error: HTTP ${response.code} - $errorBody"))
             }
