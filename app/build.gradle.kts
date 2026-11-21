@@ -83,11 +83,10 @@ dependencies {
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.coroutines.android)
 
-    // OkHttp & Google Auth for Sheets API (Service Account & Google Sign-In)
+    // OkHttp & Google Auth for Sheets API
     implementation(libs.okhttp)
     implementation(libs.okhttp.logging)
     implementation(libs.google.auth.oauth2)
-    implementation(libs.play.services.auth)
 
     // Unit Testing
     testImplementation(libs.junit)

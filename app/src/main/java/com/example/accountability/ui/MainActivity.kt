@@ -7,13 +7,14 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
-import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -25,22 +26,19 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
-import androidx.lifecycle.lifecycleScope
 import com.example.accountability.data.local.AccountabilityEntity
-import com.example.accountability.data.remote.AuthMode
 import com.example.accountability.data.remote.GoogleSheetsService
 import com.example.accountability.data.repository.AccountabilityRepository
 import com.example.accountability.scheduler.AlarmScheduler
 import com.example.accountability.ui.theme.*
-import com.google.android.gms.auth.api.signin.GoogleSignIn
-import com.google.android.gms.auth.api.signin.GoogleSignInOptions
-import com.google.android.gms.common.api.ApiException
-import com.google.android.gms.common.api.Scope
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.*
@@ -79,29 +77,16 @@ fun MainDashboardScreen(
     repository: AccountabilityRepository
 ) {
     val context = LocalContext.current
+    val clipboardManager = LocalClipboardManager.current
     val coroutineScope = rememberCoroutineScope()
     val sheetsService = repository.getSheetsService()
 
     var isAlarmEnabled by remember { mutableStateOf(true) }
     var nextAlarmTime by remember { mutableStateOf(scheduler.calculateNext9PmTrigger()) }
-    var spreadsheetId by remember { mutableStateOf(sheetsService.getSpreadsheetId()) }
-    var sheetName by remember { mutableStateOf(sheetsService.getSheetName()) }
-    var authMode by remember { mutableStateOf(sheetsService.getAuthMode()) }
+    var webhookUrl by remember { mutableStateOf(sheetsService.getWebhookUrl()) }
+    var isConfigured by remember { mutableStateOf(sheetsService.hasValidAuthentication()) }
 
-    var hasCredentials by remember { mutableStateOf(sheetsService.hasValidAuthentication()) }
-    var isGoogleSignedIn by remember { mutableStateOf(sheetsService.isGoogleSignedIn()) }
-    var googleAccountEmail by remember { mutableStateOf(sheetsService.getGoogleAccountEmail()) }
-    var serviceAccountEmail by remember { mutableStateOf(sheetsService.getServiceAccountEmail()) }
-
-    // Dialog state
-    var showServiceAccountDialog by remember { mutableStateOf(false) }
-    var showOAuthDialog by remember { mutableStateOf(false) }
-    var credentialsInput by remember { mutableStateOf("") }
-    var oauthClientIdInput by remember { mutableStateOf("") }
-    var oauthClientSecretInput by remember { mutableStateOf("") }
-    var oauthRefreshTokenInput by remember { mutableStateOf("") }
-
-    // Test connection state
+    var showScriptGuide by remember { mutableStateOf(false) }
     var isTestingConnection by remember { mutableStateOf(false) }
     var connectionTestResult by remember { mutableStateOf<String?>(null) }
     var isConnectionSuccess by remember { mutableStateOf(false) }
@@ -125,45 +110,6 @@ fun MainDashboardScreen(
     val notifPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { _ -> }
-
-    // Google Sign-In setup
-    val gso = remember {
-        GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
-            .requestEmail()
-            .requestScopes(Scope(GoogleSheetsService.SCOPE_SPREADSHEETS))
-            .build()
-    }
-    val googleSignInClient = remember {
-        GoogleSignIn.getClient(context, gso)
-    }
-
-    val googleSignInLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        val task = GoogleSignIn.getSignedInAccountFromIntent(result.data)
-        try {
-            val account = task.getResult(ApiException::class.java)
-            if (account != null) {
-                val email = account.email ?: ""
-                val name = account.displayName
-                sheetsService.saveGoogleAccount(email, name)
-                sheetsService.setAuthMode(AuthMode.GOOGLE_SIGN_IN)
-                authMode = AuthMode.GOOGLE_SIGN_IN
-                isGoogleSignedIn = true
-                googleAccountEmail = email
-                hasCredentials = true
-                Toast.makeText(context, "Signed in as $email! Daily sync ready.", Toast.LENGTH_LONG).show()
-            }
-        } catch (e: ApiException) {
-            Log.e("MainActivity", "Google Sign-In failed code: ${e.statusCode}", e)
-            val msg = when (e.statusCode) {
-                10 -> "Google Play Services configuration (code 10). If unlinked, you can also use Service Account or OAuth tab."
-                12500 -> "Sign-in cancelled."
-                else -> "Sign-in failed (code ${e.statusCode}). Please try again."
-            }
-            Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
-        }
-    }
 
     LaunchedEffect(Unit) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -301,7 +247,7 @@ fun MainDashboardScreen(
                 }
             }
 
-            // Google Sheets Integration Card
+            // Google Sheets Direct Connection Card (Zero Auth)
             item {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
@@ -314,234 +260,102 @@ fun MainDashboardScreen(
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text(
-                                "Google Sheets API Integration",
-                                style = MaterialTheme.typography.titleSmall,
-                                fontWeight = FontWeight.Bold,
-                                color = TextLight
-                            )
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    Icons.Default.TableChart,
+                                    contentDescription = null,
+                                    tint = PrimaryBlue,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    "Google Sheet Direct (Zero Auth)",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = TextLight
+                                )
+                            }
                             Badge(
-                                containerColor = if (hasCredentials) AccentGreen else WarningAmber
+                                containerColor = if (isConfigured) AccentGreen else WarningAmber
                             ) {
                                 Text(
-                                    if (hasCredentials) "Authenticated" else "Auth Required",
+                                    if (isConfigured) "Connected" else "URL Required",
                                     color = Color.White,
                                     modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
                                 )
                             }
                         }
 
-                        Spacer(modifier = Modifier.height(12.dp))
-
-                        // Auth Mode Selector Tabs
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            FilterChip(
-                                selected = authMode == AuthMode.GOOGLE_SIGN_IN,
-                                onClick = {
-                                    authMode = AuthMode.GOOGLE_SIGN_IN
-                                    sheetsService.setAuthMode(AuthMode.GOOGLE_SIGN_IN)
-                                    hasCredentials = sheetsService.hasValidAuthentication()
-                                },
-                                label = { Text("Google Account (1-Tap)", fontSize = 11.sp) },
-                                modifier = Modifier.weight(1f)
-                            )
-                            FilterChip(
-                                selected = authMode == AuthMode.SERVICE_ACCOUNT,
-                                onClick = {
-                                    authMode = AuthMode.SERVICE_ACCOUNT
-                                    sheetsService.setAuthMode(AuthMode.SERVICE_ACCOUNT)
-                                    hasCredentials = sheetsService.hasValidAuthentication()
-                                },
-                                label = { Text("Service Account", fontSize = 11.sp) },
-                                modifier = Modifier.weight(1f)
-                            )
-                            FilterChip(
-                                selected = authMode == AuthMode.OAUTH_REFRESH_TOKEN,
-                                onClick = {
-                                    authMode = AuthMode.OAUTH_REFRESH_TOKEN
-                                    sheetsService.setAuthMode(AuthMode.OAUTH_REFRESH_TOKEN)
-                                    hasCredentials = sheetsService.hasValidAuthentication()
-                                },
-                                label = { Text("OAuth (Manual)", fontSize = 11.sp) },
-                                modifier = Modifier.weight(1f)
-                            )
-                        }
-
-                        Spacer(modifier = Modifier.height(12.dp))
-
-                        // Render Section Based on Auth Mode
-                        when (authMode) {
-                            AuthMode.GOOGLE_SIGN_IN -> {
-                                if (isGoogleSignedIn && !googleAccountEmail.isNullOrBlank()) {
-                                    Card(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        colors = CardDefaults.cardColors(containerColor = Color(0xFF1E2D24)),
-                                        shape = RoundedCornerShape(12.dp)
-                                    ) {
-                                        Column(modifier = Modifier.padding(12.dp)) {
-                                            Row(
-                                                verticalAlignment = Alignment.CenterVertically,
-                                                horizontalArrangement = Arrangement.SpaceBetween,
-                                                modifier = Modifier.fillMaxWidth()
-                                            ) {
-                                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                                    Icon(
-                                                        Icons.Default.CheckCircle,
-                                                        contentDescription = null,
-                                                        tint = AccentGreen,
-                                                        modifier = Modifier.size(20.dp)
-                                                    )
-                                                    Spacer(modifier = Modifier.width(8.dp))
-                                                    Text(
-                                                        googleAccountEmail ?: "Connected",
-                                                        style = MaterialTheme.typography.bodyMedium,
-                                                        fontWeight = FontWeight.Bold,
-                                                        color = TextLight
-                                                    )
-                                                }
-                                                TextButton(
-                                                    onClick = {
-                                                        sheetsService.signOutGoogle {
-                                                            isGoogleSignedIn = false
-                                                            googleAccountEmail = null
-                                                            hasCredentials = sheetsService.hasValidAuthentication()
-                                                        }
-                                                    }
-                                                ) {
-                                                    Text("Sign Out", fontSize = 12.sp, color = DangerRed)
-                                                }
-                                            }
-                                            Spacer(modifier = Modifier.height(4.dp))
-                                            Text(
-                                                "1-time authorization active. Daily 9 PM updates will sync automatically to your Google Sheet without prompting you again.",
-                                                style = MaterialTheme.typography.bodySmall,
-                                                color = TextDim
-                                            )
-                                        }
-                                    }
-                                } else {
-                                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                        Text(
-                                            "Sign in once with your Google account. No API keys or JSON files required:",
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = TextDim
-                                        )
-                                        Button(
-                                            onClick = {
-                                                googleSignInLauncher.launch(googleSignInClient.signInIntent)
-                                            },
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .height(48.dp),
-                                            shape = RoundedCornerShape(12.dp),
-                                            colors = ButtonDefaults.buttonColors(containerColor = PrimaryBlue)
-                                        ) {
-                                            Icon(Icons.Default.AccountCircle, contentDescription = null)
-                                            Spacer(modifier = Modifier.width(10.dp))
-                                            Text(
-                                                "Sign In with Google Account",
-                                                fontWeight = FontWeight.Bold,
-                                                fontSize = 15.sp
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-
-                            AuthMode.SERVICE_ACCOUNT -> {
-                                if (serviceAccountEmail != null) {
-                                    Text(
-                                        "Active Key: $serviceAccountEmail",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = AccentGreen,
-                                        maxLines = 1
-                                    )
-                                    Spacer(modifier = Modifier.height(4.dp))
-                                }
-                                OutlinedButton(
-                                    onClick = { showServiceAccountDialog = true },
-                                    modifier = Modifier.fillMaxWidth(),
-                                    shape = RoundedCornerShape(10.dp)
-                                ) {
-                                    Icon(Icons.Default.Key, contentDescription = null, modifier = Modifier.size(16.dp))
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text(if (hasCredentials) "Replace Key (JSON)" else "Paste Service Account JSON")
-                                }
-                            }
-
-                            AuthMode.OAUTH_REFRESH_TOKEN -> {
-                                OutlinedButton(
-                                    onClick = { showOAuthDialog = true },
-                                    modifier = Modifier.fillMaxWidth(),
-                                    shape = RoundedCornerShape(10.dp)
-                                ) {
-                                    Icon(Icons.Default.Key, contentDescription = null, modifier = Modifier.size(16.dp))
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text("Configure Client ID & Refresh Token")
-                                }
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.height(12.dp))
-
-                        // Spreadsheet Settings
-                        OutlinedTextField(
-                            value = spreadsheetId,
-                            onValueChange = {
-                                spreadsheetId = it
-                                sheetsService.saveSpreadsheetId(it)
-                            },
-                            label = { Text("Google Spreadsheet ID") },
-                            placeholder = { Text("e.g. 1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms") },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true
-                        )
-
                         Spacer(modifier = Modifier.height(8.dp))
 
+                        Text(
+                            "Connects directly to your Google Sheet without any sign-in, login passwords, or API keys.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = TextDim
+                        )
+
+                        Spacer(modifier = Modifier.height(12.dp))
+
                         OutlinedTextField(
-                            value = sheetName,
+                            value = webhookUrl,
                             onValueChange = {
-                                sheetName = it
-                                sheetsService.saveSheetName(it)
+                                webhookUrl = it
+                                sheetsService.saveWebhookUrl(it)
+                                isConfigured = sheetsService.hasValidAuthentication()
                             },
-                            label = { Text("Sheet Tab Name") },
+                            label = { Text("Google Sheet Webhook URL") },
+                            placeholder = { Text("https://script.google.com/macros/s/.../exec") },
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = true
                         )
 
                         Spacer(modifier = Modifier.height(12.dp))
 
-                        // Test Connection Button
-                        Button(
-                            onClick = {
-                                isTestingConnection = true
-                                connectionTestResult = null
-                                coroutineScope.launch {
-                                    val res = sheetsService.testConnection()
-                                    isTestingConnection = false
-                                    if (res.isSuccess) {
-                                        isConnectionSuccess = true
-                                        connectionTestResult = res.getOrNull()
-                                    } else {
-                                        isConnectionSuccess = false
-                                        connectionTestResult = res.exceptionOrNull()?.message
-                                    }
-                                }
-                            },
+                        Row(
                             modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(10.dp),
-                            colors = ButtonDefaults.buttonColors(containerColor = PrimaryBlue)
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            if (isTestingConnection) {
-                                CircularProgressIndicator(color = Color.White, modifier = Modifier.size(16.dp))
-                            } else {
-                                Icon(Icons.Default.Sync, contentDescription = null, modifier = Modifier.size(16.dp))
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text("Test Connection & Access")
+                            Button(
+                                onClick = {
+                                    isTestingConnection = true
+                                    connectionTestResult = null
+                                    coroutineScope.launch {
+                                        val res = sheetsService.testConnection()
+                                        isTestingConnection = false
+                                        if (res.isSuccess) {
+                                            isConnectionSuccess = true
+                                            connectionTestResult = res.getOrNull()
+                                        } else {
+                                            isConnectionSuccess = false
+                                            connectionTestResult = res.exceptionOrNull()?.message
+                                        }
+                                    }
+                                },
+                                modifier = Modifier.weight(1f),
+                                shape = RoundedCornerShape(10.dp),
+                                colors = ButtonDefaults.buttonColors(containerColor = PrimaryBlue)
+                            ) {
+                                if (isTestingConnection) {
+                                    CircularProgressIndicator(color = Color.White, modifier = Modifier.size(16.dp))
+                                } else {
+                                    Icon(Icons.Default.Sync, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("Test Connection")
+                                }
+                            }
+
+                            OutlinedButton(
+                                onClick = { showScriptGuide = !showScriptGuide },
+                                modifier = Modifier.weight(1f),
+                                shape = RoundedCornerShape(10.dp)
+                            ) {
+                                Icon(
+                                    if (showScriptGuide) Icons.Default.ExpandLess else Icons.Default.HelpOutline,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(if (showScriptGuide) "Hide Guide" else "1-Min Setup")
                             }
                         }
 
@@ -552,6 +366,74 @@ fun MainDashboardScreen(
                                 style = MaterialTheme.typography.bodySmall,
                                 color = if (isConnectionSuccess) AccentGreen else DangerRed
                             )
+                        }
+
+                        // Expandable 1-Minute Setup Guide
+                        AnimatedVisibility(visible = showScriptGuide) {
+                            Column(
+                                modifier = Modifier
+                                    .padding(top = 12.dp)
+                                    .background(Color(0xFF0F172A), RoundedCornerShape(10.dp))
+                                    .border(1.dp, Color(0xFF334155), RoundedCornerShape(10.dp))
+                                    .padding(12.dp)
+                            ) {
+                                Text(
+                                    "How to get your Webhook URL in 1 minute:",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = AccentGreen
+                                )
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Text("1. Open your Google Sheet in browser.", style = MaterialTheme.typography.bodySmall, color = TextLight)
+                                Text("2. Click Extensions → Apps Script.", style = MaterialTheme.typography.bodySmall, color = TextLight)
+                                Text("3. Replace all code with this snippet:", style = MaterialTheme.typography.bodySmall, color = TextLight)
+
+                                val scriptCode = """
+function doPost(e) {
+  var d = JSON.parse(e.postData.contents);
+  SpreadsheetApp.getActiveSpreadsheet().getActiveSheet().appendRow([
+    d.timestamp, d.socks, d.towel, d.books, d.transcript, "SUCCESS"
+  ]);
+  return ContentService.createTextOutput("OK");
+}
+function doGet(e) {
+  return ContentService.createTextOutput("OK");
+}
+                                """.trimIndent()
+
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Surface(
+                                    color = Color(0xFF020617),
+                                    shape = RoundedCornerShape(6.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Column(modifier = Modifier.padding(8.dp)) {
+                                        Text(
+                                            scriptCode,
+                                            fontFamily = FontFamily.Monospace,
+                                            fontSize = 11.sp,
+                                            color = Color(0xFF38BDF8)
+                                        )
+                                        Spacer(modifier = Modifier.height(6.dp))
+                                        Button(
+                                            onClick = {
+                                                clipboardManager.setText(AnnotatedString(scriptCode))
+                                                Toast.makeText(context, "Script copied to clipboard!", Toast.LENGTH_SHORT).show()
+                                            },
+                                            modifier = Modifier.align(Alignment.End),
+                                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF334155))
+                                        ) {
+                                            Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(14.dp))
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                            Text("Copy Script", fontSize = 12.sp)
+                                        }
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Text("4. Click Deploy → New deployment → select Web app.", style = MaterialTheme.typography.bodySmall, color = TextLight)
+                                Text("5. Set 'Who has access' to Anyone, click Deploy, and copy the Web URL here!", style = MaterialTheme.typography.bodySmall, color = AccentGreen, fontWeight = FontWeight.Bold)
+                            }
                         }
                     }
                 }
@@ -593,117 +475,6 @@ fun MainDashboardScreen(
                 }
             }
         }
-    }
-
-    // Service Account JSON Dialog
-    if (showServiceAccountDialog) {
-        AlertDialog(
-            onDismissRequest = { showServiceAccountDialog = false },
-            title = { Text("Service Account Key (JSON)") },
-            text = {
-                Column {
-                    Text(
-                        "Paste your Google Cloud Service Account JSON credentials below. It will be securely persisted on this device:",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = TextDim
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    OutlinedTextField(
-                        value = credentialsInput,
-                        onValueChange = { credentialsInput = it },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(180.dp),
-                        placeholder = { Text("{\n  \"type\": \"service_account\",\n  \"client_email\": \"...\"\n}") }
-                    )
-                }
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        if (credentialsInput.isNotBlank()) {
-                            val ok = sheetsService.saveCredentialsJson(credentialsInput)
-                            if (ok) {
-                                hasCredentials = sheetsService.hasValidAuthentication()
-                                serviceAccountEmail = sheetsService.getServiceAccountEmail()
-                                showServiceAccountDialog = false
-                                Toast.makeText(context, "Service Account saved permanently!", Toast.LENGTH_SHORT).show()
-                            } else {
-                                Toast.makeText(context, "Invalid Service Account JSON. Ensure it has client_email and private_key.", Toast.LENGTH_LONG).show()
-                            }
-                        }
-                    }
-                ) {
-                    Text("Save & Persist")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showServiceAccountDialog = false }) {
-                    Text("Cancel")
-                }
-            }
-        )
-    }
-
-    // OAuth 2.0 Configuration Dialog
-    if (showOAuthDialog) {
-        AlertDialog(
-            onDismissRequest = { showOAuthDialog = false },
-            title = { Text("OAuth 2.0 (1-Time Authorization)") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(
-                        "Enter your OAuth credentials and Refresh Token. Once configured, access persists indefinitely and auto-refreshes daily at 9 PM without user prompts:",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = TextDim
-                    )
-                    OutlinedTextField(
-                        value = oauthClientIdInput,
-                        onValueChange = { oauthClientIdInput = it },
-                        label = { Text("OAuth Client ID") },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true
-                    )
-                    OutlinedTextField(
-                        value = oauthClientSecretInput,
-                        onValueChange = { oauthClientSecretInput = it },
-                        label = { Text("Client Secret (Optional)") },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true
-                    )
-                    OutlinedTextField(
-                        value = oauthRefreshTokenInput,
-                        onValueChange = { oauthRefreshTokenInput = it },
-                        label = { Text("OAuth Refresh Token") },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true
-                    )
-                }
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        if (oauthRefreshTokenInput.isNotBlank()) {
-                            sheetsService.saveOAuthCredentials(
-                                clientId = oauthClientIdInput,
-                                clientSecret = oauthClientSecretInput,
-                                refreshToken = oauthRefreshTokenInput
-                            )
-                            hasCredentials = sheetsService.hasValidAuthentication()
-                            showOAuthDialog = false
-                            Toast.makeText(context, "OAuth credentials saved. Auto-refresh enabled!", Toast.LENGTH_SHORT).show()
-                        }
-                    }
-                ) {
-                    Text("Save & Enable")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showOAuthDialog = false }) {
-                    Text("Cancel")
-                }
-            }
-        )
     }
 }
 
