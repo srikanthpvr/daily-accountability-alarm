@@ -1,0 +1,17 @@
+<resources>
+    <string name="app_name">Daily Accountability</string>
+    <string name="alarm_channel_id">daily_accountability_channel</string>
+    <string name="alarm_channel_name">Evening Accountability Prompt</string>
+    <string name="alarm_channel_desc">Daily 9 PM notification to verify completed evening tasks</string>
+    <string name="notification_title">Evening Accountability Check</string>
+    <string name="notification_text">Tap to record your daily tasks: socks, towel, and books</string>
+
+    <string name="task_socks_title">Soaking socks</string>
+    <string name="task_socks_question">Did you complete soaking your socks?</string>
+
+    <string name="task_towel_title">Hanging the towel</string>
+    <string name="task_towel_question">Did you complete hanging the towel?</string>
+
+    <string name="task_books_title">Packing books</string>
+    <string name="task_books_question">Did you complete packing your books?</string>
+</resources>
