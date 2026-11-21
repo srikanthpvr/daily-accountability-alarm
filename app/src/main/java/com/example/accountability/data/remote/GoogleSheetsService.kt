@@ -112,13 +112,15 @@ class GoogleSheetsService(private val context: Context) {
 
     fun getGoogleAccountEmail(): String? {
         val account = GoogleSignIn.getLastSignedInAccount(context)
-        if (!account?.email.isNullOrBlank()) return account.email
+        val email = account?.email
+        if (!email.isNullOrBlank()) return email
         return prefs.getString(KEY_GOOGLE_ACCOUNT_EMAIL, null)
     }
 
     fun getGoogleAccountDisplayName(): String? {
         val account = GoogleSignIn.getLastSignedInAccount(context)
-        if (!account?.displayName.isNullOrBlank()) return account.displayName
+        val name = account?.displayName
+        if (!name.isNullOrBlank()) return name
         return prefs.getString(KEY_GOOGLE_ACCOUNT_NAME, null)
     }
 
