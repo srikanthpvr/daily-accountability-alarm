@@ -1,20 +1,21 @@
 package com.example.accountability.ui
 
+import android.Manifest
 import android.app.KeyguardManager
 import android.content.Context
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -32,6 +33,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.example.accountability.data.repository.AccountabilityRepository
 import com.example.accountability.model.TaskItem
@@ -49,13 +51,24 @@ class FullScreenPromptActivity : ComponentActivity(), TurnByTurnVoiceManager.Voi
     private val voiceStatusText = mutableStateOf("Initializing evening check...")
     private val isListeningState = mutableStateOf(false)
     private val isSpeakingState = mutableStateOf(false)
+    private val audioVolumeNormalized = mutableFloatStateOf(0f)
     private val lastTranscriptState = mutableStateOf("")
     private val isCompletedState = mutableStateOf(false)
     private val isSubmittingState = mutableStateOf(false)
     private val submissionResultText = mutableStateOf<String?>(null)
 
-    // Observable tasks
     private val tasksState = mutableStateListOf<TaskItem>()
+
+    private val micPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        if (isGranted) {
+            voiceStatusText.value = "Microphone permitted. Starting check..."
+            voiceManager.startDialogue()
+        } else {
+            voiceStatusText.value = "Microphone permission denied. Use buttons below."
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -77,10 +90,15 @@ class FullScreenPromptActivity : ComponentActivity(), TurnByTurnVoiceManager.Voi
             }
         }
 
-        // Start voice dialogue after short delay to allow screen to wake up fully
-        window.decorView.postDelayed({
-            voiceManager.startDialogue()
-        }, 800)
+        // Verify microphone permission before launching audio flow
+        val hasMic = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        if (!hasMic) {
+            micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        } else {
+            window.decorView.postDelayed({
+                voiceManager.startDialogue()
+            }, 700)
+        }
     }
 
     private fun setupLockScreenWake() {
@@ -106,15 +124,18 @@ class FullScreenPromptActivity : ComponentActivity(), TurnByTurnVoiceManager.Voi
         val statusText by voiceStatusText
         val isListening by isListeningState
         val isSpeaking by isSpeakingState
+        val volumeLevel by audioVolumeNormalized
         val lastTranscript by lastTranscriptState
         val isCompleted by isCompletedState
         val isSubmitting by isSubmittingState
         val submissionResult by submissionResultText
 
+        val animatedVolume by animateFloatAsState(targetValue = volumeLevel, label = "volume")
+
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(24.dp)
+                .padding(20.dp)
                 .verticalScroll(rememberScrollState()),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.SpaceBetween
@@ -129,13 +150,13 @@ class FullScreenPromptActivity : ComponentActivity(), TurnByTurnVoiceManager.Voi
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = if (!isCompleted) "Step ${currentStep + 1} of 3" else "All Tasks Reviewed",
+                    text = if (!isCompleted) "Task ${currentStep + 1} of 3 (Listening for answer)" else "All Tasks Reviewed",
                     style = MaterialTheme.typography.bodyMedium,
                     color = TextDim
                 )
             }
 
-            Spacer(modifier = Modifier.height(20.dp))
+            Spacer(modifier = Modifier.height(16.dp))
 
             // Main Question Card or Completion View
             if (!isCompleted && currentStep < tasksState.size) {
@@ -144,12 +165,12 @@ class FullScreenPromptActivity : ComponentActivity(), TurnByTurnVoiceManager.Voi
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(vertical = 12.dp),
+                        .padding(vertical = 8.dp),
                     shape = RoundedCornerShape(16.dp),
                     colors = CardDefaults.cardColors(containerColor = SurfaceDark)
                 ) {
                     Column(
-                        modifier = Modifier.padding(24.dp),
+                        modifier = Modifier.padding(22.dp),
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
                         Text(
@@ -198,6 +219,28 @@ class FullScreenPromptActivity : ComponentActivity(), TurnByTurnVoiceManager.Voi
                     }
                 }
 
+                // Real-time Audio Level Decibel Meter (Proves Mic is Active)
+                if (isListening) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth(0.8f)) {
+                        LinearProgressIndicator(
+                            progress = { animatedVolume.coerceIn(0f, 1f) },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(6.dp)
+                                .clip(RoundedCornerShape(4.dp)),
+                            color = AccentGreen,
+                            trackColor = SurfaceDark,
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = if (volumeLevel > 0.15f) "🎙️ Audio Input Detected" else "Speak into microphone...",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (volumeLevel > 0.15f) AccentGreen else TextDim
+                        )
+                    }
+                }
+
                 if (lastTranscript.isNotBlank()) {
                     Text(
                         text = "Heard: \"$lastTranscript\"",
@@ -207,18 +250,18 @@ class FullScreenPromptActivity : ComponentActivity(), TurnByTurnVoiceManager.Voi
                     )
                 }
 
-                Spacer(modifier = Modifier.height(24.dp))
+                Spacer(modifier = Modifier.height(20.dp))
 
                 // Manual Touch Fallback Buttons
                 Text(
-                    text = "Or tap your answer directly:",
+                    text = "Speak into mic or tap your answer directly:",
                     style = MaterialTheme.typography.labelSmall,
                     color = TextDim
                 )
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(10.dp))
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(16.dp)
+                    horizontalArrangement = Arrangement.spacedBy(14.dp)
                 ) {
                     Button(
                         onClick = { voiceManager.setManualAnswer(TaskStatus.YES) },
@@ -310,7 +353,7 @@ class FullScreenPromptActivity : ComponentActivity(), TurnByTurnVoiceManager.Voi
                 }
             }
 
-            Spacer(modifier = Modifier.height(20.dp))
+            Spacer(modifier = Modifier.height(16.dp))
 
             // Footer action
             if (isCompleted) {
@@ -325,8 +368,15 @@ class FullScreenPromptActivity : ComponentActivity(), TurnByTurnVoiceManager.Voi
                     Text("Done & Close", fontSize = 15.sp, fontWeight = FontWeight.Bold)
                 }
             } else {
-                TextButton(onClick = { voiceManager.askCurrentTask() }) {
-                    Text("Repeat Question", color = PrimaryBlue)
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    OutlinedButton(onClick = { voiceManager.startListeningForCurrentTask() }) {
+                        Icon(Icons.Default.Mic, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Tap to Speak")
+                    }
+                    TextButton(onClick = { voiceManager.askCurrentTask() }) {
+                        Text("Repeat Question", color = PrimaryBlue)
+                    }
                 }
             }
         }
@@ -338,6 +388,7 @@ class FullScreenPromptActivity : ComponentActivity(), TurnByTurnVoiceManager.Voi
             currentStepState.intValue = taskIndex
             isSpeakingState.value = true
             isListeningState.value = false
+            audioVolumeNormalized.floatValue = 0f
             voiceStatusText.value = "Asking task ${taskIndex + 1}..."
         }
     }
@@ -350,9 +401,18 @@ class FullScreenPromptActivity : ComponentActivity(), TurnByTurnVoiceManager.Voi
         }
     }
 
+    override fun onAudioVolumeChanged(rmsdB: Float) {
+        runOnUiThread {
+            // Map typical speech RMS dB (-2dB to 10dB) to 0.0 - 1.0 range
+            val normalized = ((rmsdB + 2f) / 12f).coerceIn(0f, 1f)
+            audioVolumeNormalized.floatValue = normalized
+        }
+    }
+
     override fun onTaskResult(taskIndex: Int, status: TaskStatus, spokenText: String) {
         runOnUiThread {
             isListeningState.value = false
+            audioVolumeNormalized.floatValue = 0f
             lastTranscriptState.value = spokenText
             if (taskIndex < tasksState.size) {
                 tasksState[taskIndex] = tasksState[taskIndex].copy(status = status, transcript = spokenText)
@@ -364,6 +424,7 @@ class FullScreenPromptActivity : ComponentActivity(), TurnByTurnVoiceManager.Voi
         runOnUiThread {
             isSpeakingState.value = false
             isListeningState.value = false
+            audioVolumeNormalized.floatValue = 0f
             isCompletedState.value = true
             submitResultsToGoogleSheets(tasks)
         }
@@ -373,6 +434,7 @@ class FullScreenPromptActivity : ComponentActivity(), TurnByTurnVoiceManager.Voi
         runOnUiThread {
             voiceStatusText.value = message
             isListeningState.value = false
+            audioVolumeNormalized.floatValue = 0f
         }
     }
 

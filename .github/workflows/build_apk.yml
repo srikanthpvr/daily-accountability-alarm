@@ -12,6 +12,8 @@ jobs:
     name: Compile & Package APK
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout Repository

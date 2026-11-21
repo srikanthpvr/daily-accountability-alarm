@@ -24,6 +24,13 @@
     <!-- Android 13+ Notification permission -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- Package visibility query required for SpeechRecognizer on Android 11+ (API 30+) -->
+    <queries>
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
+        </intent>
+    </queries>
+
     <application
         android:name=".AccountabilityApplication"
         android:allowBackup="true"

@@ -29,10 +29,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
 import com.example.accountability.data.local.AccountabilityEntity
+import com.example.accountability.data.remote.AuthMode
 import com.example.accountability.data.repository.AccountabilityRepository
 import com.example.accountability.scheduler.AlarmScheduler
 import com.example.accountability.ui.theme.*
+import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -70,20 +73,35 @@ fun MainDashboardScreen(
     repository: AccountabilityRepository
 ) {
     val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
     val sheetsService = repository.getSheetsService()
 
     var isAlarmEnabled by remember { mutableStateOf(true) }
     var nextAlarmTime by remember { mutableStateOf(scheduler.calculateNext9PmTrigger()) }
     var spreadsheetId by remember { mutableStateOf(sheetsService.getSpreadsheetId()) }
     var sheetName by remember { mutableStateOf(sheetsService.getSheetName()) }
-    var hasCredentials by remember { mutableStateOf(sheetsService.hasCredentials()) }
-    var showCredentialsDialog by remember { mutableStateOf(false) }
+    var authMode by remember { mutableStateOf(sheetsService.getAuthMode()) }
+
+    var hasCredentials by remember { mutableStateOf(sheetsService.hasValidAuthentication()) }
+    var serviceAccountEmail by remember { mutableStateOf(sheetsService.getServiceAccountEmail()) }
+
+    // Dialog state
+    var showServiceAccountDialog by remember { mutableStateOf(false) }
+    var showOAuthDialog by remember { mutableStateOf(false) }
     var credentialsInput by remember { mutableStateOf("") }
+    var oauthClientIdInput by remember { mutableStateOf("") }
+    var oauthClientSecretInput by remember { mutableStateOf("") }
+    var oauthRefreshTokenInput by remember { mutableStateOf("") }
+
+    // Test connection state
+    var isTestingConnection by remember { mutableStateOf(false) }
+    var connectionTestResult by remember { mutableStateOf<String?>(null) }
+    var isConnectionSuccess by remember { mutableStateOf(false) }
 
     val records by repository.getAllRecords().collectAsState(initial = emptyList())
     val pendingCount by repository.getPendingCount().collectAsState(initial = 0)
 
-    // Permission launchers
+    // Permission state
     var hasMicPermission by remember {
         mutableStateOf(
             ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
@@ -181,7 +199,7 @@ fun MainDashboardScreen(
                                 scheduler.scheduleTestAlarm(5)
                                 Toast.makeText(
                                     context,
-                                    "Alarm set for 5s! Lock your phone now to test wake-up.",
+                                    "Alarm set for 5s! Lock your phone now to test full-screen wake up.",
                                     Toast.LENGTH_LONG
                                 ).show()
                             },
@@ -206,7 +224,7 @@ fun MainDashboardScreen(
                 ) {
                     Column(modifier = Modifier.padding(16.dp)) {
                         Text(
-                            "System Permissions",
+                            "System Permissions & Audio",
                             style = MaterialTheme.typography.titleSmall,
                             fontWeight = FontWeight.Bold,
                             color = TextLight
@@ -214,7 +232,7 @@ fun MainDashboardScreen(
                         Spacer(modifier = Modifier.height(8.dp))
 
                         PermissionRow(
-                            title = "Microphone (STT)",
+                            title = "Microphone (STT Input)",
                             isGranted = hasMicPermission,
                             onFix = { micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO) }
                         )
@@ -250,23 +268,62 @@ fun MainDashboardScreen(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                "Google Sheets API (Option A)",
+                                "Google Sheets API Integration",
                                 style = MaterialTheme.typography.titleSmall,
                                 fontWeight = FontWeight.Bold,
                                 color = TextLight
                             )
                             Badge(
-                                containerColor = if (hasCredentials) AccentGreen else DangerRed
+                                containerColor = if (hasCredentials) AccentGreen else WarningAmber
                             ) {
                                 Text(
-                                    if (hasCredentials) "Credentials Loaded" else "Missing Service Account",
+                                    if (hasCredentials) "Authenticated" else "Auth Required",
                                     color = Color.White,
                                     modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
                                 )
                             }
                         }
 
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        // Auth Mode Selector
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            FilterChip(
+                                selected = authMode == AuthMode.SERVICE_ACCOUNT,
+                                onClick = {
+                                    authMode = AuthMode.SERVICE_ACCOUNT
+                                    sheetsService.setAuthMode(AuthMode.SERVICE_ACCOUNT)
+                                    hasCredentials = sheetsService.hasValidAuthentication()
+                                },
+                                label = { Text("Service Account (Key)") },
+                                modifier = Modifier.weight(1f)
+                            )
+                            FilterChip(
+                                selected = authMode == AuthMode.OAUTH_REFRESH_TOKEN,
+                                onClick = {
+                                    authMode = AuthMode.OAUTH_REFRESH_TOKEN
+                                    sheetsService.setAuthMode(AuthMode.OAUTH_REFRESH_TOKEN)
+                                    hasCredentials = sheetsService.hasValidAuthentication()
+                                },
+                                label = { Text("OAuth 2.0 (Refresh)") },
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+
                         Spacer(modifier = Modifier.height(10.dp))
+
+                        if (authMode == AuthMode.SERVICE_ACCOUNT && serviceAccountEmail != null) {
+                            Text(
+                                "Active Account: $serviceAccountEmail",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = AccentGreen,
+                                maxLines = 1
+                            )
+                            Spacer(modifier = Modifier.height(6.dp))
+                        }
 
                         OutlinedTextField(
                             value = spreadsheetId,
@@ -295,14 +352,61 @@ fun MainDashboardScreen(
 
                         Spacer(modifier = Modifier.height(12.dp))
 
-                        OutlinedButton(
-                            onClick = { showCredentialsDialog = true },
+                        Row(
                             modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(10.dp)
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            Icon(Icons.Default.Key, contentDescription = null)
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(if (hasCredentials) "Update Service Account JSON" else "Paste Service Account JSON")
+                            OutlinedButton(
+                                onClick = {
+                                    if (authMode == AuthMode.SERVICE_ACCOUNT) {
+                                        showServiceAccountDialog = true
+                                    } else {
+                                        showOAuthDialog = true
+                                    }
+                                },
+                                modifier = Modifier.weight(1f),
+                                shape = RoundedCornerShape(10.dp)
+                            ) {
+                                Icon(Icons.Default.Key, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(if (authMode == AuthMode.SERVICE_ACCOUNT) "Configure Key" else "Configure OAuth")
+                            }
+
+                            Button(
+                                onClick = {
+                                    isTestingConnection = true
+                                    connectionTestResult = null
+                                    coroutineScope.launch {
+                                        val res = sheetsService.testConnection()
+                                        isTestingConnection = false
+                                        if (res.isSuccess) {
+                                            isConnectionSuccess = true
+                                            connectionTestResult = res.getOrNull()
+                                        } else {
+                                            isConnectionSuccess = false
+                                            connectionTestResult = res.exceptionOrNull()?.message
+                                        }
+                                    }
+                                },
+                                modifier = Modifier.weight(1f),
+                                shape = RoundedCornerShape(10.dp),
+                                colors = ButtonDefaults.buttonColors(containerColor = PrimaryBlue)
+                            ) {
+                                if (isTestingConnection) {
+                                    CircularProgressIndicator(color = Color.White, modifier = Modifier.size(16.dp))
+                                } else {
+                                    Text("Test Connection")
+                                }
+                            }
+                        }
+
+                        if (connectionTestResult != null) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = connectionTestResult ?: "",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (isConnectionSuccess) AccentGreen else DangerRed
+                            )
                         }
                     }
                 }
@@ -346,15 +450,15 @@ fun MainDashboardScreen(
         }
     }
 
-    // Credentials Dialog
-    if (showCredentialsDialog) {
+    // Service Account JSON Dialog
+    if (showServiceAccountDialog) {
         AlertDialog(
-            onDismissRequest = { showCredentialsDialog = false },
-            title = { Text("Service Account Credentials") },
+            onDismissRequest = { showServiceAccountDialog = false },
+            title = { Text("Service Account Key (JSON)") },
             text = {
                 Column {
                     Text(
-                        "Paste your Google Cloud Service Account JSON credentials here (or place service_account.json in assets):",
+                        "Paste your Google Cloud Service Account JSON credentials below. It will be securely persisted on this device:",
                         style = MaterialTheme.typography.bodySmall,
                         color = TextDim
                     )
@@ -365,7 +469,7 @@ fun MainDashboardScreen(
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(180.dp),
-                        placeholder = { Text("{\n  \"type\": \"service_account\"...\n}") }
+                        placeholder = { Text("{\n  \"type\": \"service_account\",\n  \"client_email\": \"...\"\n}") }
                     )
                 }
             },
@@ -373,18 +477,84 @@ fun MainDashboardScreen(
                 Button(
                     onClick = {
                         if (credentialsInput.isNotBlank()) {
-                            sheetsService.saveCredentialsJson(credentialsInput)
-                            hasCredentials = sheetsService.hasCredentials()
-                            showCredentialsDialog = false
-                            Toast.makeText(context, "Credentials saved successfully", Toast.LENGTH_SHORT).show()
+                            val ok = sheetsService.saveCredentialsJson(credentialsInput)
+                            if (ok) {
+                                hasCredentials = sheetsService.hasValidAuthentication()
+                                serviceAccountEmail = sheetsService.getServiceAccountEmail()
+                                showServiceAccountDialog = false
+                                Toast.makeText(context, "Service Account saved permanently!", Toast.LENGTH_SHORT).show()
+                            } else {
+                                Toast.makeText(context, "Invalid Service Account JSON. Ensure it has client_email and private_key.", Toast.LENGTH_LONG).show()
+                            }
                         }
                     }
                 ) {
-                    Text("Save")
+                    Text("Save & Persist")
                 }
             },
             dismissButton = {
-                TextButton(onClick = { showCredentialsDialog = false }) {
+                TextButton(onClick = { showServiceAccountDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    // OAuth 2.0 Configuration Dialog
+    if (showOAuthDialog) {
+        AlertDialog(
+            onDismissRequest = { showOAuthDialog = false },
+            title = { Text("OAuth 2.0 (1-Time Authorization)") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "Enter your OAuth credentials and Refresh Token. Once configured, access persists indefinitely and auto-refreshes daily at 9 PM without user prompts:",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextDim
+                    )
+                    OutlinedTextField(
+                        value = oauthClientIdInput,
+                        onValueChange = { oauthClientIdInput = it },
+                        label = { Text("OAuth Client ID") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true
+                    )
+                    OutlinedTextField(
+                        value = oauthClientSecretInput,
+                        onValueChange = { oauthClientSecretInput = it },
+                        label = { Text("Client Secret (Optional)") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true
+                    )
+                    OutlinedTextField(
+                        value = oauthRefreshTokenInput,
+                        onValueChange = { oauthRefreshTokenInput = it },
+                        label = { Text("OAuth Refresh Token") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        if (oauthRefreshTokenInput.isNotBlank()) {
+                            sheetsService.saveOAuthCredentials(
+                                clientId = oauthClientIdInput,
+                                clientSecret = oauthClientSecretInput,
+                                refreshToken = oauthRefreshTokenInput
+                            )
+                            hasCredentials = sheetsService.hasValidAuthentication()
+                            showOAuthDialog = false
+                            Toast.makeText(context, "OAuth credentials saved. Auto-refresh enabled!", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                ) {
+                    Text("Save & Enable")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showOAuthDialog = false }) {
                     Text("Cancel")
                 }
             }
